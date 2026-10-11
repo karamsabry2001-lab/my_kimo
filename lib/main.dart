@@ -79,7 +79,6 @@ class GamaeyaScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      id: 'gamaeya_screen',
       child: ListView(
         children: const [
           Card(
