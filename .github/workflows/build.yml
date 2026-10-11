@@ -13,24 +13,27 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Find and extract zip file
+    - name: Extract source code
       run: |
-        echo "Searching for zip files..."
+        echo "Listing files in root:"
+        ls -la
+        
+        # Look for any zip file or fallback to current directory
         ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
-        if [ -z "$ZIP_FILE" ]; then
-          echo "No zip file found in root!"
-          exit 1
+        if [ -n "$ZIP_FILE" ]; then
+          echo "Extracting $ZIP_FILE..."
+          unzip -q "$ZIP_FILE" -d extracted_code
+          cd extracted_code
+          # If there is a single folder inside, enter it
+          if [ $(ls -1 | wc -l) -eq 1 ] && [ -d "$(ls -1)" ]; then
+            cd $(ls -1)
+          fi
+          cp -r . ../../
+          cd ../..
+          rm -rf extracted_code
+        else
+          echo "No zip file found, looking for direct source files..."
         fi
-        echo "Found zip file: $ZIP_FILE"
-        mkdir -p extracted_code
-        unzip -q "$ZIP_FILE" -d extracted_code
-        cd extracted_code
-        if [ $(ls -1 | wc -l) -eq 1 ] && [ -d "$(ls -1)" ]; then
-          cd $(ls -1)
-        fi
-        cp -r . ../
-        cd ..
-        rm -rf extracted_code
 
     - name: Set up Java
       uses: actions/setup-java@v4
@@ -45,7 +48,7 @@ jobs:
         channel: 'stable'
 
     - name: Install dependencies
-      run: flutter pub get || true
+      run: flutter pub get
 
     - name: Build APK
       run: flutter build apk --release
