@@ -1,139 +1,206 @@
+/*
+Kimo Manager - Production Ready Single File App
+
+pubspec.yaml dependencies:
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.2.2
+  flutter_local_notifications: ^17.1.2
+  timezone: ^0.9.4
+*/
+
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
 
-void main() {
-  runApp(const KimoApp());
+class StorageService {
+  static late SharedPreferences _prefs;
+  static const String _kGamaya = 'kimo_gamaya_v2';
+  static const String _kMeds = 'kimo_meds_v2';
+  static const String _kAppts = 'kimo_appts_v2';
+  static Future<void> init() async => _prefs = await SharedPreferences.getInstance();
+  static List<Gamaya> loadGamaya() {
+    final raw = _prefs.getString(_kGamaya);
+    if (raw == null) return [];
+    try { return (jsonDecode(raw) as List).map((e) => Gamaya.fromJson(e)).toList(); } catch (_) { return []; }
+  }
+  static Future<void> saveGamaya(List<Gamaya> d) async => await _prefs.setString(_kGamaya, jsonEncode(d.map((e) => e.toJson()).toList()));
+  static List<Medication> loadMeds() {
+    final raw = _prefs.getString(_kMeds);
+    if (raw == null) return [];
+    try { return (jsonDecode(raw) as List).map((e) => Medication.fromJson(e)).toList(); } catch (_) { return []; }
+  }
+  static Future<void> saveMeds(List<Medication> d) async => await _prefs.setString(_kMeds, jsonEncode(d.map((e) => e.toJson()).toList()));
+  static List<Appointment> loadAppts() {
+    final raw = _prefs.getString(_kAppts);
+    if (raw == null) return [];
+    try { return (jsonDecode(raw) as List).map((e) => Appointment.fromJson(e)).toList(); } catch (_) { return []; }
+  }
+  static Future<void> saveAppts(List<Appointment> d) async => await _prefs.setString(_kAppts, jsonEncode(d.map((e) => e.toJson()).toList()));
 }
 
-class KimoApp extends StatelessWidget {
-  const KimoApp({super.key});
+class NotificationService {
+  static final _plugin = FlutterLocalNotificationsPlugin();
+  static Future<void> init() async {
+    tz.initializeTimeZones();
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const settings = InitializationSettings(android: android);
+    await _plugin.initialize(settings);
+    final impl = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    await impl?.requestNotificationsPermission();
+    await impl?.requestExactAlarmsPermission();
+  }
+  static int _sid(String id, int i) => (id.hashCode + i).abs() % 2147483647;
+  static Future<void> scheduleMedication(Medication med) async {
+    await cancelMedication(med.id);
+    if (!med.enabled) return;
+    for (int i = 0; i < med.times.length; i++) {
+      final p = med.times[i].split(':');
+      if (p.length != 2) continue;
+      final h = int.tryParse(p[0]) ?? 8;
+      final m = int.tryParse(p[1]) ?? 0;
+      var sched = tz.TZDateTime(tz.local, DateTime.now().year, DateTime.now().month, DateTime.now().day, h, m);
+      if (sched.isBefore(tz.TZDateTime.now(tz.local))) sched = sched.add(const Duration(days: 1));
+      try {
+        await _plugin.zonedSchedule(_sid(med.id, i), '💊 ${med.name}', 'Dosage: ${med.dosage}', sched, const NotificationDetails(android: AndroidNotificationDetails('kimo_meds', 'Medication', importance: Importance.max, priority: Priority.high)), androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle, uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime, matchDateTimeComponents: DateTimeComponents.time);
+      } catch (e) { debugPrint('sched fail $e'); }
+    }
+  }
+  static Future<void> cancelMedication(String id) async { for (int i = 0; i < 10; i++) await _plugin.cancel(_sid(id, i)); }
+}
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'مساعد كرم الشامل',
-      theme: ThemeData(
-        primarySwatch: Colors.indigo,
-        useMaterial3: true,
-      ),
-      home: const HomeScreen(),
-    );
+class GamayaMember {
+  String id; String name; bool hasPaid; bool hasReceived; int turn;
+  GamayaMember({required this.id, required this.name, this.hasPaid=false, this.hasReceived=false, required this.turn});
+  Map<String,dynamic> toJson() => {'id':id,'name':name,'hasPaid':hasPaid,'hasReceived':hasReceived,'turn':turn};
+  factory GamayaMember.fromJson(Map<String,dynamic> j) => GamayaMember(id:j['id'], name:j['name'], hasPaid:j['hasPaid']??false, hasReceived:j['hasReceived']??false, turn:j['turn']);
+}
+class Gamaya {
+  String id; String title; double monthlyAmount; List<GamayaMember> members; int currentTurnIndex; String status; DateTime createdAt;
+  Gamaya({required this.id, required this.title, required this.monthlyAmount, required this.members, this.currentTurnIndex=0, this.status='active', required this.createdAt});
+  double get totalPool => monthlyAmount * members.length;
+  double get progress => members.isEmpty?0:members.where((m)=>m.hasPaid).length/members.length;
+  Map<String,dynamic> toJson() => {'id':id,'title':title,'monthlyAmount':monthlyAmount,'members':members.map((e)=>e.toJson()).toList(),'currentTurnIndex':currentTurnIndex,'status':status,'createdAt':createdAt.toIso8601String()};
+  factory Gamaya.fromJson(Map<String,dynamic> j) => Gamaya(id:j['id'], title:j['title'], monthlyAmount:(j['monthlyAmount'] as num).toDouble(), members:(j['members'] as List).map((e)=>GamayaMember.fromJson(e)).toList(), currentTurnIndex:j['currentTurnIndex']??0, status:j['status']??'active', createdAt:DateTime.parse(j['createdAt']));
+}
+class Medication {
+  String id; String name; String dosage; List<String> times; String notes; bool enabled;
+  Medication({required this.id, required this.name, required this.dosage, required this.times, this.notes='', this.enabled=true});
+  Map<String,dynamic> toJson() => {'id':id,'name':name,'dosage':dosage,'times':times,'notes':notes,'enabled':enabled};
+  factory Medication.fromJson(Map<String,dynamic> j) => Medication(id:j['id'], name:j['name'], dosage:j['dosage'], times:List<String>.from(j['times']??[]), notes:j['notes']??'', enabled:j['enabled']??true);
+}
+class Appointment {
+  String id; String doctorName; String specialty; String clinic; DateTime dateTime; String notes; String status;
+  Appointment({required this.id, required this.doctorName, required this.specialty, required this.clinic, required this.dateTime, this.notes='', this.status='upcoming'});
+  Map<String,dynamic> toJson() => {'id':id,'doctorName':doctorName,'specialty':specialty,'clinic':clinic,'dateTime':dateTime.toIso8601String(),'notes':notes,'status':status};
+  factory Appointment.fromJson(Map<String,dynamic> j) => Appointment(id:j['id'], doctorName:j['doctorName'], specialty:j['specialty']??'', clinic:j['clinic']??'', dateTime:DateTime.parse(j['dateTime']), notes:j['notes']??'', status:j['status']??'upcoming');
+}
+
+class AppColors {
+  static const primary = Color(0xFF6C5CE7);
+  static const secondary = Color(0xFF00CEC9);
+  static const accent = Color(0xFFFF7675);
+  static const success = Color(0xFF00B894);
+  static const warning = Color(0xFFFDCB6E);
+  static const bgLight = Color(0xFFF8F9FF);
+  static const gradientPurple = LinearGradient(colors:[Color(0xFF6C5CE7), Color(0xFFA29BFE)], begin:Alignment.topLeft, end:Alignment.bottomRight);
+  static const gradientTeal = LinearGradient(colors:[Color(0xFF00CEC9), Color(0xFF81ECEC)], begin:Alignment.topLeft, end:Alignment.bottomRight);
+  static const gradientPink = LinearGradient(colors:[Color(0xFFFF7675), Color(0xFFFF9AA2)], begin:Alignment.topLeft, end:Alignment.bottomRight);
+  static const gradientGold = LinearGradient(colors:[Color(0xFFFDCB6E), Color(0xFFE17055)], begin:Alignment.topLeft, end:Alignment.bottomRight);
+  static const gradientDark = LinearGradient(colors:[Color(0xFF2D3436), Color(0xFF636E72)], begin:Alignment.topLeft, end:Alignment.bottomRight);
+}
+ThemeData buildTheme(){
+  final scheme = ColorScheme.fromSeed(seedColor: AppColors.primary);
+  return ThemeData(useMaterial3:true, colorScheme:scheme, scaffoldBackgroundColor:AppColors.bgLight, appBarTheme:const AppBarTheme(backgroundColor:Colors.transparent, elevation:0, centerTitle:true, titleTextStyle:TextStyle(color:Colors.black87,fontSize:22,fontWeight:FontWeight.bold)), cardTheme:CardThemeData(elevation:0, shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20)), color:Colors.white), navigationBarTheme:NavigationBarThemeData(backgroundColor:Colors.white, indicatorColor:AppColors.primary.withOpacity(0.15)));
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try{ tz.initializeTimeZones(); }catch(_){}
+  await StorageService.init();
+  try{ await NotificationService.init(); }catch(e){ debugPrint('notif $e'); }
+  runApp(const KimoManagerApp());
+}
+class KimoManagerApp extends StatelessWidget{ const KimoManagerApp({super.key}); @override Widget build(BuildContext context){ return MaterialApp(title:'Kimo Manager', debugShowCheckedModeBanner:false, theme:buildTheme(), home:const KimoHome()); } }
+
+class KimoHome extends StatefulWidget{ const KimoHome({super.key}); @override State<KimoHome> createState()=>_KimoHomeState(); }
+class _KimoHomeState extends State<KimoHome>{
+  int _index=0;
+  List<Gamaya> _gamayas=[]; List<Medication> _meds=[]; List<Appointment> _appts=[];
+  @override void initState(){ super.initState(); _loadAll(); }
+  void _loadAll(){ setState((){ _gamayas=StorageService.loadGamaya(); _meds=StorageService.loadMeds(); _appts=StorageService.loadAppts(); _appts.sort((a,b)=>a.dateTime.compareTo(b.dateTime)); }); }
+  Future<void> _saveGamaya() async { await StorageService.saveGamaya(_gamayas); setState((){}); }
+  Future<void> _saveMeds() async { await StorageService.saveMeds(_meds); setState((){}); }
+  Future<void> _saveAppts() async { await StorageService.saveAppts(_appts); setState((){}); }
+  @override Widget build(BuildContext context){
+    final screens=[
+      DashboardScreen(gamayas:_gamayas, meds:_meds, appts:_appts, onTapIndex:(i)=>setState(()=>_index=i)),
+      GamayaScreen(gamayas:_gamayas, onAdd:(g) async {_gamayas.add(g); await _saveGamaya();}, onUpdate:(g) async { final idx=_gamayas.indexWhere((e)=>e.id==g.id); if(idx!=-1) _gamayas[idx]=g; await _saveGamaya(); }, onDelete:(id) async { _gamayas.removeWhere((e)=>e.id==id); await _saveGamaya(); }),
+      MedicationScreen(meds:_meds, onAdd:(m) async { _meds.add(m); await NotificationService.scheduleMedication(m); await _saveMeds(); }, onUpdate:(m) async { final idx=_meds.indexWhere((e)=>e.id==m.id); if(idx!=-1) _meds[idx]=m; await NotificationService.scheduleMedication(m); await _saveMeds(); }, onDelete:(id) async { await NotificationService.cancelMedication(id); _meds.removeWhere((e)=>e.id==id); await _saveMeds(); }),
+      AppointmentScreen(appts:_appts, onAdd:(a) async { _appts.add(a); _appts.sort((x,y)=>x.dateTime.compareTo(y.dateTime)); await _saveAppts(); }, onUpdate:(a) async { final idx=_appts.indexWhere((e)=>e.id==a.id); if(idx!=-1) _appts[idx]=a; _appts.sort((x,y)=>x.dateTime.compareTo(y.dateTime)); await _saveAppts(); }, onDelete:(id) async { _appts.removeWhere((e)=>e.id==id); await _saveAppts(); }),
+    ];
+    return Scaffold(body:AnimatedSwitcher(duration:const Duration(milliseconds:300), child:screens[_index]), bottomNavigationBar:Container(decoration:BoxDecoration(color:Colors.white, boxShadow:[BoxShadow(color:Colors.black.withOpacity(0.06), blurRadius:20, offset:const Offset(0,-5))]), child:NavigationBar(selectedIndex:_index, onDestinationSelected:(i)=>setState(()=>_index=i), height:72, destinations:const [NavigationDestination(icon:Icon(Icons.dashboard_rounded), label:'Home'), NavigationDestination(icon:Icon(Icons.groups_rounded), label:"Gam'eya"), NavigationDestination(icon:Icon(Icons.medication_rounded), label:'Meds'), NavigationDestination(icon:Icon(Icons.event_note_rounded), label:'Clinics')])));
   }
 }
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-  int _currentIndex = 0;
-
-  final List<Widget> _screens = const [
-    GamaeyaScreen(),
-    MedicationScreen(),
-    AppointmentsScreen(),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('تطبيق كرم للجمعيات والأدوية'),
-        backgroundColor: Colors.indigo,
-        foregroundColor: Colors.white,
-      ),
-      body: _screens[_currentIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        onTap: (index) {
-          setState(() {
-            _currentIndex = index;
-          });
-        },
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.group),
-            label: 'الجمعيات',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.medication),
-            label: 'الأدوية',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_today),
-            label: 'المواعيد',
-          ),
-        ],
-      ),
-    );
+class DashboardScreen extends StatelessWidget{
+  final List<Gamaya> gamayas; final List<Medication> meds; final List<Appointment> appts; final Function(int) onTapIndex;
+  const DashboardScreen({super.key, required this.gamayas, required this.meds, required this.appts, required this.onTapIndex});
+  @override Widget build(BuildContext context){
+    final upcoming = appts.where((a)=>a.status=='upcoming' && a.dateTime.isAfter(DateTime.now().subtract(const Duration(days:1)))).toList();
+    final next = upcoming.isNotEmpty?upcoming.first:null;
+    return SafeArea(child:ListView(padding:const EdgeInsets.all(20), children:[
+      const SizedBox(height:10),
+      Row(children:[Container(width:56,height:56,decoration:const BoxDecoration(shape:BoxShape.circle, gradient:AppColors.gradientPurple), child:const Icon(Icons.person_rounded,color:Colors.white,size:32)), const SizedBox(width:14), const Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text('Welcome back', style:TextStyle(color:Colors.black54,fontSize:14)), Text('Kimo Manager', style:TextStyle(fontSize:24,fontWeight:FontWeight.bold))]))]),
+      const SizedBox(height:28),
+      GridView.count(crossAxisCount:2, shrinkWrap:true, physics:const NeverScrollableScrollPhysics(), crossAxisSpacing:14, mainAxisSpacing:14, childAspectRatio:1.4, children:[
+        _stat(title:"Gam'eya", value:'${gamayas.length}', sub:'${gamayas.where((g)=>g.status=='active').length} active', gradient:AppColors.gradientPurple, icon:Icons.groups_rounded, onTap:()=>onTapIndex(1)),
+        _stat(title:'Meds', value:'${meds.length}', sub:'${meds.where((m)=>m.enabled).length} active', gradient:AppColors.gradientTeal, icon:Icons.medication_rounded, onTap:()=>onTapIndex(2)),
+        _stat(title:'Appts', value:'${appts.length}', sub:'${upcoming.length} upcoming', gradient:AppColors.gradientGold, icon:Icons.local_hospital_rounded, onTap:()=>onTapIndex(3)),
+        _stat(title:'Pool', value:'${gamayas.fold(0.0,(s,g)=>s+g.totalPool).toStringAsFixed(0)} EGP', sub:'total', gradient:AppColors.gradientPink, icon:Icons.account_balance_wallet_rounded, onTap:()=>onTapIndex(1)),
+      ]),
+      const SizedBox(height:24),
+      const Text('Next Up', style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)), const SizedBox(height:12),
+      if(next!=null) _glass(Row(children:[Container(width:54,height:54,decoration:BoxDecoration(borderRadius:BorderRadius.circular(14), gradient:AppColors.gradientGold), child:const Icon(Icons.event_rounded,color:Colors.white)), const SizedBox(width:14), Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text(next.doctorName, style:const TextStyle(fontWeight:FontWeight.bold,fontSize:16)), Text('${next.clinic} - ${next.dateTime.day}/${next.dateTime.month}', style:const TextStyle(color:Colors.black54))]))])) else _glass(const Text('No upcoming appointments 🎉', style:TextStyle(color:Colors.black54))),
+      const SizedBox(height:12),
+      if(meds.isNotEmpty) _glass(Row(children:[Container(width:54,height:54,decoration:BoxDecoration(borderRadius:BorderRadius.circular(14), gradient:AppColors.gradientTeal), child:const Icon(Icons.alarm_rounded,color:Colors.white)), const SizedBox(width:14), Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text('${meds.first.name} • ${meds.first.dosage}', style:const TextStyle(fontWeight:FontWeight.bold)), Text('Times: ${meds.first.times.join(', ')}', style:const TextStyle(color:Colors.black54))]))])),
+    ]));
   }
+  Widget _stat({required String title, required String value, required String sub, required Gradient gradient, required IconData icon, required VoidCallback onTap})=>GestureDetector(onTap:onTap, child:Container(decoration:BoxDecoration(gradient:gradient, borderRadius:BorderRadius.circular(22), boxShadow:[BoxShadow(color:gradient.colors.first.withOpacity(0.3), blurRadius:12, offset:const Offset(0,6))]), padding:const EdgeInsets.all(16), child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Container(padding:const EdgeInsets.all(8), decoration:BoxDecoration(color:Colors.white.withOpacity(0.25), borderRadius:BorderRadius.circular(10)), child:Icon(icon,color:Colors.white,size:20)), const Icon(Icons.arrow_outward_rounded,color:Colors.white70,size:18)]), const Spacer(), Text(value, style:const TextStyle(color:Colors.white,fontSize:22,fontWeight:FontWeight.bold)), Text('$title • $sub', style:const TextStyle(color:Colors.white70,fontSize:12)) ])));
+  Widget _glass(Widget child)=>Container(padding:const EdgeInsets.all(16), decoration:BoxDecoration(color:Colors.white, borderRadius:BorderRadius.circular(18), boxShadow:[BoxShadow(color:Colors.black.withOpacity(0.04), blurRadius:12)]), child:child);
 }
 
-class GamaeyaScreen extends StatelessWidget {
-  const GamaeyaScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: ListView(
-        children: const [
-          Card(
-            child: ListTile(
-              leading: Icon(Icons.savings, color: Colors.indigo),
-              title: Text('جمعية الشهر الحالي'),
-              subtitle: Text('المبلغ: 5000 جنيه - الدور القادم: الأول'),
-            ),
-          ),
-        ],
-      ),
-    );
+class GamayaScreen extends StatelessWidget{
+  final List<Gamaya> gamayas; final Function(Gamaya) onAdd; final Function(Gamaya) onUpdate; final Function(String) onDelete;
+  const GamayaScreen({super.key, required this.gamayas, required this.onAdd, required this.onUpdate, required this.onDelete});
+  @override Widget build(BuildContext context){
+    return SafeArea(child:Column(children:[
+      Padding(padding:const EdgeInsets.fromLTRB(20,20,20,10), child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Column(crossAxisAlignment:CrossAxisAlignment.start, children:[const Text("Gam'eya", style:TextStyle(fontSize:28,fontWeight:FontWeight.bold)), Text('${gamayas.length} groups', style:const TextStyle(color:Colors.black54))]), ElevatedButton.icon(onPressed:()=>_showDialog(context), style:ElevatedButton.styleFrom(backgroundColor:AppColors.primary, foregroundColor:Colors.white, shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(14))), icon:const Icon(Icons.add_rounded), label:const Text('New'))])),
+      Expanded(child:gamayas.isEmpty? _empty(icon:Icons.groups_rounded, title:'No Gam\'eya yet', sub:'Create your first savings group'): ListView.builder(padding:const EdgeInsets.all(16), itemCount:gamayas.length, itemBuilder:(c,i){
+        final g=gamayas[i]; final cur = g.members.isNotEmpty && g.currentTurnIndex < g.members.length ? g.members[g.currentTurnIndex] : null;
+        return Container(margin:const EdgeInsets.only(bottom:16), decoration:BoxDecoration(color:Colors.white, borderRadius:BorderRadius.circular(20), boxShadow:[BoxShadow(color:Colors.black.withOpacity(0.05), blurRadius:15, offset:const Offset(0,5))]), child:InkWell(borderRadius:BorderRadius.circular(20), onTap:()=>_showDetail(context,g), child:Padding(padding:const EdgeInsets.all(18), child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Row(children:[Container(width:48,height:48,decoration:const BoxDecoration(gradient:AppColors.gradientPurple, borderRadius:BorderRadius.all(Radius.circular(14))), child:const Icon(Icons.savings_rounded,color:Colors.white)), const SizedBox(width:12), Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text(g.title, style:const TextStyle(fontWeight:FontWeight.bold,fontSize:18)), Text('${g.members.length} members • ${g.monthlyAmount.toStringAsFixed(0)} EGP/mo', style:const TextStyle(color:Colors.black54,fontSize:13))])), Container(padding:const EdgeInsets.symmetric(horizontal:10,vertical:4), decoration:BoxDecoration(color:(g.status=='active'?AppColors.success:AppColors.primary).withOpacity(0.15), borderRadius:BorderRadius.circular(20)), child:Text(g.status.toUpperCase(), style:TextStyle(color:g.status=='active'?AppColors.success:AppColors.primary, fontWeight:FontWeight.bold, fontSize:10)))]), const SizedBox(height:16), ClipRRect(borderRadius:BorderRadius.circular(8), child:LinearProgressIndicator(value:g.progress, minHeight:8, backgroundColor:Colors.black.withOpacity(0.06), valueColor:const AlwaysStoppedAnimation(AppColors.primary))), const SizedBox(height:12), Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Text('Pool: ${g.totalPool.toStringAsFixed(0)} EGP', style:const TextStyle(fontWeight:FontWeight.w600)), if(cur!=null) Container(padding:const EdgeInsets.symmetric(horizontal:10,vertical:6), decoration:BoxDecoration(color:AppColors.warning.withOpacity(0.2), borderRadius:BorderRadius.circular(20)), child:Text('Turn: ${cur.name}', style:const TextStyle(fontSize:12,fontWeight:FontWeight.bold)))])]))));
+      })),
+    ]));
   }
+  void _showDialog(BuildContext context, {Gamaya? existing}){ showDialog(context:context, builder:(_)=>GamayaDialog(existing:existing, onSave:(g)=>existing==null?onAdd(g):onUpdate(g))); }
+  void _showDetail(BuildContext context, Gamaya g){ showModalBottomSheet(context:context, isScrollControlled:true, backgroundColor:Colors.white, shape:const RoundedRectangleBorder(borderRadius:BorderRadius.vertical(top:Radius.circular(24))), builder:(_)=>GamayaDetailSheet(gamaya:g, onUpdate:onUpdate, onDelete:onDelete, onClose:()=>Navigator.pop(context))); }
 }
+class GamayaDetailSheet extends StatefulWidget{ final Gamaya gamaya; final Function(Gamaya) onUpdate; final Function(String) onDelete; final VoidCallback onClose; const GamayaDetailSheet({super.key, required this.gamaya, required this.onUpdate, required this.onDelete, required this.onClose}); @override State<GamayaDetailSheet> createState()=>_GamayaDetailSheetState(); }
+class _GamayaDetailSheetState extends State<GamayaDetailSheet>{ late Gamaya g; @override void initState(){ super.initState(); g=widget.gamaya; } @override Widget build(BuildContext context){ return DraggableScrollableSheet(initialChildSize:0.85, maxChildSize:0.95, expand:false, builder:(context,controller)=>ListView(controller:controller, padding:const EdgeInsets.all(20), children:[Center(child:Container(width:40,height:4,decoration:BoxDecoration(color:Colors.black12,borderRadius:BorderRadius.circular(10)))), const SizedBox(height:16), Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Text(g.title, style:const TextStyle(fontSize:22,fontWeight:FontWeight.bold)), Row(children:[IconButton(onPressed:()=>_edit(), icon:const Icon(Icons.edit_rounded,color:AppColors.primary)), IconButton(onPressed:()=>_confirmDelete(), icon:const Icon(Icons.delete_rounded,color:AppColors.accent))])]), Text('Created ${g.createdAt.day}/${g.createdAt.month}/${g.createdAt.year} • Pool ${g.totalPool.toStringAsFixed(0)} EGP'), const SizedBox(height:20), Row(children:[Expanded(child:ElevatedButton.icon(onPressed:_nextTurn, icon:const Icon(Icons.skip_next_rounded), label:const Text('Next Turn'), style:ElevatedButton.styleFrom(backgroundColor:AppColors.primary, foregroundColor:Colors.white))), const SizedBox(width:12), Expanded(child:OutlinedButton.icon(onPressed:_markAllPaid, icon:const Icon(Icons.check_circle_rounded), label:const Text('All Paid')))]), const SizedBox(height:20), const Text('Members', style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)), const SizedBox(height:10), ...g.members.asMap().entries.map((e){ final idx=e.key; final m=e.value; final isCur=idx==g.currentTurnIndex; return Container(margin:const EdgeInsets.only(bottom:10), padding:const EdgeInsets.all(14), decoration:BoxDecoration(color:isCur?AppColors.primary.withOpacity(0.08):Colors.white, borderRadius:BorderRadius.circular(16), border:Border.all(color:isCur?AppColors.primary:Colors.black.withOpacity(0.06))), child:Row(children:[CircleAvatar(backgroundColor:isCur?AppColors.primary:Colors.black12, child:Text('${m.turn}', style:const TextStyle(color:Colors.white,fontWeight:FontWeight.bold))), const SizedBox(width:12), Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text(m.name, style:TextStyle(fontWeight:FontWeight.bold, color:isCur?AppColors.primary:Colors.black87)), Text(m.hasReceived?'Received':isCur?'Current turn':'Waiting', style:TextStyle(fontSize:12, color:m.hasReceived?AppColors.success:Colors.black54))])), Checkbox(value:m.hasPaid, onChanged:(v)=>_togglePaid(m,v!), activeColor:AppColors.success)])); })])); } void _togglePaid(GamayaMember m,bool v){ setState(()=>m.hasPaid=v); widget.onUpdate(g); } void _nextTurn(){ if(g.members.isEmpty) return; setState((){ if(g.currentTurnIndex<g.members.length) g.members[g.currentTurnIndex].hasReceived=true; if(g.currentTurnIndex<g.members.length-1) g.currentTurnIndex++; else g.status='completed'; }); widget.onUpdate(g);} void _markAllPaid(){ setState(()=>g.members.forEach((m)=>m.hasPaid=true)); widget.onUpdate(g);} void _edit(){ widget.onClose(); showDialog(context:context, builder:(_)=>GamayaDialog(existing:g, onSave:(ng)=>widget.onUpdate(ng))); } void _confirmDelete(){ showDialog(context:context, builder:(c)=>AlertDialog(title:const Text('Delete Gam\'eya?'), content:const Text('This action cannot be undone.'), actions:[TextButton(onPressed:()=>Navigator.pop(c), child:const Text('Cancel')), ElevatedButton(onPressed:(){ Navigator.pop(c); widget.onClose(); widget.onDelete(g.id); }, style:ElevatedButton.styleFrom(backgroundColor:AppColors.accent), child:const Text('Delete'))])); } }
+class GamayaDialog extends StatefulWidget{ final Gamaya? existing; final Function(Gamaya) onSave; const GamayaDialog({super.key, this.existing, required this.onSave}); @override State<GamayaDialog> createState()=>_GamayaDialogState(); }
+class _GamayaDialogState extends State<GamayaDialog>{ final _form=GlobalKey<FormState>(); late TextEditingController _titleCtrl; late TextEditingController _amountCtrl; List<TextEditingController> _memberCtrls=[]; String _status='active'; @override void initState(){ super.initState(); _titleCtrl=TextEditingController(text:widget.existing?.title??''); _amountCtrl=TextEditingController(text:widget.existing?.monthlyAmount.toStringAsFixed(0)??''); _status=widget.existing?.status??'active'; if(widget.existing!=null) _memberCtrls=widget.existing!.members.map((m)=>TextEditingController(text:m.name)).toList(); else _memberCtrls=[TextEditingController(), TextEditingController(), TextEditingController()]; } @override void dispose(){ _titleCtrl.dispose(); _amountCtrl.dispose(); for(var c in _memberCtrls) c.dispose(); super.dispose(); } @override Widget build(BuildContext context){ return AlertDialog(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20)), title:Text(widget.existing==null?'New Gam\'eya':'Edit Gam\'eya', style:const TextStyle(fontWeight:FontWeight.bold)), content:SingleChildScrollView(child:Form(key:_form, child:Column(mainAxisSize:MainAxisSize.min, children:[TextFormField(controller:_titleCtrl, decoration:_dec('Title'), validator:(v)=>v!.trim().isEmpty?'Required':null), const SizedBox(height:12), TextFormField(controller:_amountCtrl, keyboardType:TextInputType.number, decoration:_dec('Monthly Amount EGP'), validator:(v)=>(double.tryParse(v??'')==null || double.parse(v!)<=0)?'Invalid':null), const SizedBox(height:12), DropdownButtonFormField<String>(value:_status, decoration:_dec('Status'), items:const [DropdownMenuItem(value:'active', child:Text('Active')), DropdownMenuItem(value:'paused', child:Text('Paused')), DropdownMenuItem(value:'completed', child:Text('Completed'))], onChanged:(v)=>setState(()=>_status=v!)), const SizedBox(height:16), Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[const Text('Members', style:TextStyle(fontWeight:FontWeight.bold)), IconButton(onPressed:()=>setState(()=>_memberCtrls.add(TextEditingController())), icon:const Icon(Icons.person_add_rounded,color:AppColors.primary))]), ..._memberCtrls.asMap().entries.map((e)=>Padding(padding:const EdgeInsets.only(bottom:8), child:Row(children:[Expanded(child:TextFormField(controller:e.value, decoration:_dec('Member ${e.key+1}'), validator:(v)=>v!.trim().isEmpty?'Required':null)), IconButton(onPressed:(){ if(_memberCtrls.length>1) setState(()=>_memberCtrls.removeAt(e.key)); }, icon:const Icon(Icons.remove_circle_outline,color:AppColors.accent))]))), ]))), actions:[TextButton(onPressed:()=>Navigator.pop(context), child:const Text('Cancel')), ElevatedButton(onPressed:_save, style:ElevatedButton.styleFrom(backgroundColor:AppColors.primary, foregroundColor:Colors.white), child:const Text('Save'))],); } InputDecoration _dec(String l)=>InputDecoration(labelText:l, border:OutlineInputBorder(borderRadius:BorderRadius.circular(12)), filled:true, fillColor:AppColors.bgLight); void _save(){ if(!_form.currentState!.validate()) return; final members=_memberCtrls.asMap().entries.map((e)=>GamayaMember(id:widget.existing!=null && e.key < widget.existing!.members.length ? widget.existing!.members[e.key].id : '${DateTime.now().millisecondsSinceEpoch}_${e.key}', name:e.value.text.trim(), turn:e.key+1, hasPaid:widget.existing!=null && e.key < widget.existing!.members.length ? widget.existing!.members[e.key].hasPaid : false, hasReceived:widget.existing!=null && e.key < widget.existing!.members.length ? widget.existing!.members[e.key].hasReceived : false)).toList(); final g=Gamaya(id:widget.existing?.id??DateTime.now().millisecondsSinceEpoch.toString(), title:_titleCtrl.text.trim(), monthlyAmount:double.parse(_amountCtrl.text), members:members, currentTurnIndex:widget.existing?.currentTurnIndex??0, status:_status, createdAt:widget.existing?.createdAt??DateTime.now()); widget.onSave(g); Navigator.pop(context); } }
 
-class MedicationScreen extends StatelessWidget {
-  const MedicationScreen({super.key});
+class MedicationScreen extends StatelessWidget{ final List<Medication> meds; final Function(Medication) onAdd; final Function(Medication) onUpdate; final Function(String) onDelete; const MedicationScreen({super.key, required this.meds, required this.onAdd, required this.onUpdate, required this.onDelete}); @override Widget build(BuildContext context){ return SafeArea(child:Column(children:[Padding(padding:const EdgeInsets.fromLTRB(20,20,20,10), child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[const Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text('Medications', style:TextStyle(fontSize:28,fontWeight:FontWeight.bold)), Text('Pills & alarms', style:TextStyle(color:Colors.black54))]), ElevatedButton.icon(onPressed:()=>_show(context), style:ElevatedButton.styleFrom(backgroundColor:AppColors.secondary, foregroundColor:Colors.white, shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(14))), icon:const Icon(Icons.add_rounded), label:const Text('New'))])), Expanded(child:meds.isEmpty? _empty(icon:Icons.medication_rounded, title:'No medications', sub:'Add your pill schedule'): ListView.builder(padding:const EdgeInsets.all(16), itemCount:meds.length, itemBuilder:(c,i){ final m=meds[i]; return Container(margin:const EdgeInsets.only(bottom:14), decoration:BoxDecoration(color:Colors.white, borderRadius:BorderRadius.circular(20), boxShadow:[BoxShadow(color:Colors.black.withOpacity(0.05), blurRadius:12)]), child:ListTile(contentPadding:const EdgeInsets.all(16), leading:Container(width:52,height:52,decoration:BoxDecoration(gradient:m.enabled?AppColors.gradientTeal:AppColors.gradientDark, borderRadius:BorderRadius.circular(14)), child:Icon(m.enabled?Icons.medication_rounded:Icons.medication_outlined,color:Colors.white)), title:Text(m.name, style:const TextStyle(fontWeight:FontWeight.bold,fontSize:17)), subtitle:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text('${m.dosage} • ${m.times.join(', ')}', style:const TextStyle(color:Colors.black54)), if(m.notes.isNotEmpty) Text(m.notes, style:const TextStyle(fontSize:12)), const SizedBox(height:6), Wrap(spacing:6, children:m.times.map((t)=>Container(padding:const EdgeInsets.symmetric(horizontal:8,vertical:3), decoration:BoxDecoration(color:AppColors.secondary.withOpacity(0.15), borderRadius:BorderRadius.circular(20)), child:Text(t, style:const TextStyle(fontSize:11,fontWeight:FontWeight.bold,color:AppColors.secondary)))).toList())]), trailing:PopupMenuButton(onSelected:(v){ if(v=='edit') _show(context, existing:m); if(v=='delete') _confirm(context,m.id); if(v=='toggle'){ final nm=Medication(id:m.id,name:m.name,dosage:m.dosage,times:m.times,notes:m.notes,enabled:!m.enabled); onUpdate(nm);} }, itemBuilder:(_)=>[const PopupMenuItem(value:'edit', child:Row(children:[Icon(Icons.edit_rounded), SizedBox(width:8), Text('Edit')])), PopupMenuItem(value:'toggle', child:Row(children:[Icon(m.enabled?Icons.notifications_off_rounded:Icons.notifications_active_rounded), SizedBox(width:8), Text(m.enabled?'Disable':'Enable')])), const PopupMenuItem(value:'delete', child:Row(children:[Icon(Icons.delete_rounded,color:Colors.red), SizedBox(width:8), Text('Delete', style:TextStyle(color:Colors.red))]))]))); }))])) ; } void _show(BuildContext context, {Medication? existing}){ showDialog(context:context, builder:(_)=>MedicationDialog(existing:existing, onSave:(m)=>existing==null?onAdd(m):onUpdate(m))); } void _confirm(BuildContext context,String id){ showDialog(context:context, builder:(c)=>AlertDialog(title:const Text('Delete medication?'), actions:[TextButton(onPressed:()=>Navigator.pop(c), child:const Text('Cancel')), ElevatedButton(onPressed:(){ Navigator.pop(c); onDelete(id); }, style:ElevatedButton.styleFrom(backgroundColor:AppColors.accent), child:const Text('Delete'))])); } }
+class MedicationDialog extends StatefulWidget{ final Medication? existing; final Function(Medication) onSave; const MedicationDialog({super.key, this.existing, required this.onSave}); @override State<MedicationDialog> createState()=>_MedicationDialogState(); }
+class _MedicationDialogState extends State<MedicationDialog>{ final _form=GlobalKey<FormState>(); late TextEditingController _nameCtrl; late TextEditingController _dosageCtrl; late TextEditingController _notesCtrl; List<String> _times=[]; bool _enabled=true; @override void initState(){ super.initState(); _nameCtrl=TextEditingController(text:widget.existing?.name??''); _dosageCtrl=TextEditingController(text:widget.existing?.dosage??''); _notesCtrl=TextEditingController(text:widget.existing?.notes??''); _times=List.from(widget.existing?.times??['08:00']); _enabled=widget.existing?.enabled??true; } @override void dispose(){ _nameCtrl.dispose(); _dosageCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); } @override Widget build(BuildContext context){ return AlertDialog(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20)), title:Text(widget.existing==null?'New Medication':'Edit Medication', style:const TextStyle(fontWeight:FontWeight.bold)), content:SingleChildScrollView(child:Form(key:_form, child:Column(mainAxisSize:MainAxisSize.min, children:[TextFormField(controller:_nameCtrl, decoration:_dec('Pill name'), validator:(v)=>v!.trim().isEmpty?'Required':null), const SizedBox(height:12), TextFormField(controller:_dosageCtrl, decoration:_dec('Dosage'), validator:(v)=>v!.trim().isEmpty?'Required':null), const SizedBox(height:12), TextFormField(controller:_notesCtrl, decoration:_dec('Notes'), maxLines:2), const SizedBox(height:16), Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[const Text('Alarm Times', style:TextStyle(fontWeight:FontWeight.bold)), IconButton(onPressed:_addTime, icon:const Icon(Icons.alarm_add_rounded,color:AppColors.secondary))]), ..._times.asMap().entries.map((e)=>Padding(padding:const EdgeInsets.only(bottom:8), child:InkWell(onTap:()=>_pickTime(e.key), borderRadius:BorderRadius.circular(12), child:Container(padding:const EdgeInsets.symmetric(horizontal:16,vertical:14), decoration:BoxDecoration(color:AppColors.bgLight, borderRadius:BorderRadius.circular(12), border:Border.all(color:Colors.black12)), child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Text(e.value, style:const TextStyle(fontWeight:FontWeight.bold,fontSize:16)), Row(children:[const Icon(Icons.access_time_rounded,size:18,color:AppColors.secondary), const SizedBox(width:8), IconButton(onPressed:()=>setState((){ if(_times.length>1) _times.removeAt(e.key); }), icon:const Icon(Icons.close_rounded,size:18))])])))), SwitchListTile(value:_enabled, onChanged:(v)=>setState(()=>_enabled=v), title:const Text('Enable Alarms'), activeColor:AppColors.secondary), ]))), actions:[TextButton(onPressed:()=>Navigator.pop(context), child:const Text('Cancel')), ElevatedButton(onPressed:_save, style:ElevatedButton.styleFrom(backgroundColor:AppColors.secondary, foregroundColor:Colors.white), child:const Text('Save'))],); } InputDecoration _dec(String l)=>InputDecoration(labelText:l, border:OutlineInputBorder(borderRadius:BorderRadius.circular(12)), filled:true, fillColor:AppColors.bgLight); void _addTime() async { final p=await showTimePicker(context:context, initialTime:const TimeOfDay(hour:8,minute:0)); if(p!=null){ final s='${p.hour.toString().padLeft(2,'0')}:${p.minute.toString().padLeft(2,'0')}'; setState(()=>_times.add(s)); } } void _pickTime(int i) async { final parts=_times[i].split(':'); final init=TimeOfDay(hour:int.parse(parts[0]), minute:int.parse(parts[1])); final p=await showTimePicker(context:context, initialTime:init); if(p!=null){ final s='${p.hour.toString().padLeft(2,'0')}:${p.minute.toString().padLeft(2,'0')}'; setState(()=>_times[i]=s); } } void _save(){ if(!_form.currentState!.validate()) return; final m=Medication(id:widget.existing?.id??DateTime.now().millisecondsSinceEpoch.toString(), name:_nameCtrl.text.trim(), dosage:_dosageCtrl.text.trim(), times:_times, notes:_notesCtrl.text.trim(), enabled:_enabled); widget.onSave(m); Navigator.pop(context); } }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: ListView(
-        children: const [
-          Card(
-            child: ListTile(
-              leading: Icon(Icons.alarm, color: Colors.red),
-              title: Text('ميعاد الدواء'),
-              subtitle: Text('دواء الضغط - الساعة 8:00 مساءً'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+class AppointmentScreen extends StatelessWidget{ final List<Appointment> appts; final Function(Appointment) onAdd; final Function(Appointment) onUpdate; final Function(String) onDelete; const AppointmentScreen({super.key, required this.appts, required this.onAdd, required this.onUpdate, required this.onDelete}); String _fmt(DateTime d)=>'${d.day}/${d.month}/${d.year} ${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}'; @override Widget build(BuildContext context){ return SafeArea(child:Column(children:[Padding(padding:const EdgeInsets.fromLTRB(20,20,20,10), child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Column(crossAxisAlignment:CrossAxisAlignment.start, children:[const Text('Appointments', style:TextStyle(fontSize:28,fontWeight:FontWeight.bold)), Text('${appts.where((a)=>a.status=='upcoming').length} upcoming', style:const TextStyle(color:Colors.black54))]), ElevatedButton.icon(onPressed:()=>_show(context), style:ElevatedButton.styleFrom(backgroundColor:AppColors.warning, foregroundColor:Colors.black87, shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(14))), icon:const Icon(Icons.add_rounded), label:const Text('New'))])), Expanded(child:appts.isEmpty? _empty(icon:Icons.event_note_rounded, title:'No appointments', sub:'Add doctor visits'): ListView.builder(padding:const EdgeInsets.all(16), itemCount:appts.length, itemBuilder:(c,i){ final a=appts[i]; final isPast=a.dateTime.isBefore(DateTime.now()); return Container(margin:const EdgeInsets.only(bottom:14), decoration:BoxDecoration(color:Colors.white, borderRadius:BorderRadius.circular(20), boxShadow:[BoxShadow(color:Colors.black.withOpacity(0.05), blurRadius:12)]), child:ListTile(contentPadding:const EdgeInsets.all(16), leading:Container(width:52,height:52,decoration:BoxDecoration(gradient:isPast?AppColors.gradientDark:AppColors.gradientGold, borderRadius:BorderRadius.circular(14)), child:Icon(isPast?Icons.check_rounded:Icons.local_hospital_rounded,color:Colors.white)), title:Text(a.doctorName, style:const TextStyle(fontWeight:FontWeight.bold,fontSize:17)), subtitle:Column(crossAxisAlignment:CrossAxisAlignment.start, children:[Text('${a.specialty} • ${a.clinic}', style:const TextStyle(color:Colors.black54)), const SizedBox(height:4), Container(padding:const EdgeInsets.symmetric(horizontal:8,vertical:3), decoration:BoxDecoration(color:isPast?Colors.black12:AppColors.warning.withOpacity(0.2), borderRadius:BorderRadius.circular(8)), child:Text(_fmt(a.dateTime), style:const TextStyle(fontSize:12,fontWeight:FontWeight.bold))), if(a.notes.isNotEmpty) Padding(padding:const EdgeInsets.only(top:4), child:Text(a.notes, style:const TextStyle(fontSize:12)))]), trailing:PopupMenuButton(onSelected:(v){ if(v=='edit') _show(context, existing:a); if(v=='delete') _confirm(context,a.id); if(v=='complete') onUpdate(Appointment(id:a.id, doctorName:a.doctorName, specialty:a.specialty, clinic:a.clinic, dateTime:a.dateTime, notes:a.notes, status:'completed')); }, itemBuilder:(_)=>[const PopupMenuItem(value:'edit', child:Row(children:[Icon(Icons.edit_rounded), SizedBox(width:8), Text('Edit')])), const PopupMenuItem(value:'complete', child:Row(children:[Icon(Icons.check_circle_rounded,color:AppColors.success), SizedBox(width:8), Text('Mark Completed')])), const PopupMenuItem(value:'delete', child:Row(children:[Icon(Icons.delete_rounded,color:Colors.red), SizedBox(width:8), Text('Delete', style:TextStyle(color:Colors.red))]))]))); }))])) ; } void _show(BuildContext context, {Appointment? existing}){ showDialog(context:context, builder:(_)=>AppointmentDialog(existing:existing, onSave:(a)=>existing==null?onAdd(a):onUpdate(a))); } void _confirm(BuildContext context,String id){ showDialog(context:context, builder:(c)=>AlertDialog(title:const Text('Delete appointment?'), actions:[TextButton(onPressed:()=>Navigator.pop(c), child:const Text('Cancel')), ElevatedButton(onPressed:(){ Navigator.pop(c); onDelete(id); }, style:ElevatedButton.styleFrom(backgroundColor:AppColors.accent), child:const Text('Delete'))])); } }
+class AppointmentDialog extends StatefulWidget{ final Appointment? existing; final Function(Appointment) onSave; const AppointmentDialog({super.key, this.existing, required this.onSave}); @override State<AppointmentDialog> createState()=>_AppointmentDialogState(); }
+class _AppointmentDialogState extends State<AppointmentDialog>{ final _form=GlobalKey<FormState>(); late TextEditingController _doctorCtrl; late TextEditingController _specialtyCtrl; late TextEditingController _clinicCtrl; late TextEditingController _notesCtrl; late DateTime _dateTime; String _status='upcoming'; @override void initState(){ super.initState(); _doctorCtrl=TextEditingController(text:widget.existing?.doctorName??''); _specialtyCtrl=TextEditingController(text:widget.existing?.specialty??''); _clinicCtrl=TextEditingController(text:widget.existing?.clinic??''); _notesCtrl=TextEditingController(text:widget.existing?.notes??''); _dateTime=widget.existing?.dateTime??DateTime.now().add(const Duration(days:1)); _status=widget.existing?.status??'upcoming'; } @override void dispose(){ _doctorCtrl.dispose(); _specialtyCtrl.dispose(); _clinicCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); } @override Widget build(BuildContext context){ return AlertDialog(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20)), title:Text(widget.existing==null?'New Appointment':'Edit Appointment', style:const TextStyle(fontWeight:FontWeight.bold)), content:SingleChildScrollView(child:Form(key:_form, child:Column(mainAxisSize:MainAxisSize.min, children:[TextFormField(controller:_doctorCtrl, decoration:_dec('Doctor name'), validator:(v)=>v!.trim().isEmpty?'Required':null), const SizedBox(height:12), TextFormField(controller:_specialtyCtrl, decoration:_dec('Specialty')), const SizedBox(height:12), TextFormField(controller:_clinicCtrl, decoration:_dec('Clinic')), const SizedBox(height:12), InkWell(onTap:_pickDateTime, borderRadius:BorderRadius.circular(12), child:Container(width:double.infinity, padding:const EdgeInsets.symmetric(horizontal:16,vertical:16), decoration:BoxDecoration(border:Border.all(color:Colors.black26), borderRadius:BorderRadius.circular(12), color:AppColors.bgLight), child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[Text('${_dateTime.day}/${_dateTime.month}/${_dateTime.year}  ${_dateTime.hour.toString().padLeft(2,'0')}:${_dateTime.minute.toString().padLeft(2,'0')}', style:const TextStyle(fontWeight:FontWeight.bold)), const Icon(Icons.calendar_month_rounded)]))), const SizedBox(height:12), DropdownButtonFormField<String>(value:_status, decoration:_dec('Status'), items:const [DropdownMenuItem(value:'upcoming', child:Text('Upcoming')), DropdownMenuItem(value:'completed', child:Text('Completed')), DropdownMenuItem(value:'cancelled', child:Text('Cancelled'))], onChanged:(v)=>setState(()=>_status=v!)), const SizedBox(height:12), TextFormField(controller:_notesCtrl, decoration:_dec('Notes'), maxLines:3), ]))), actions:[TextButton(onPressed:()=>Navigator.pop(context), child:const Text('Cancel')), ElevatedButton(onPressed:_save, style:ElevatedButton.styleFrom(backgroundColor:AppColors.warning, foregroundColor:Colors.black87), child:const Text('Save'))],); } InputDecoration _dec(String l)=>InputDecoration(labelText:l, border:OutlineInputBorder(borderRadius:BorderRadius.circular(12)), filled:true, fillColor:AppColors.bgLight); Future<void> _pickDateTime() async { final date=await showDatePicker(context:context, initialDate:_dateTime, firstDate:DateTime(2020), lastDate:DateTime(2030)); if(date==null) return; final time=await showTimePicker(context:context, initialTime:TimeOfDay.fromDateTime(_dateTime)); if(time==null) return; setState(()=>_dateTime=DateTime(date.year,date.month,date.day,time.hour,time.minute)); } void _save(){ if(!_form.currentState!.validate()) return; final a=Appointment(id:widget.existing?.id??DateTime.now().millisecondsSinceEpoch.toString(), doctorName:_doctorCtrl.text.trim(), specialty:_specialtyCtrl.text.trim(), clinic:_clinicCtrl.text.trim(), dateTime:_dateTime, notes:_notesCtrl.text.trim(), status:_status); widget.onSave(a); Navigator.pop(context); } }
 
-class AppointmentsScreen extends StatelessWidget {
-  const AppointmentsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: ListView(
-        children: const [
-          Card(
-            child: ListTile(
-              leading: Icon(Icons.local_hospital, color: Colors.green),
-              title: Text('موعد الطبيب'),
-              subtitle: Text('دكتور العيادة - الأربعاء القادم الساعة 5 مساءً'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+Widget _empty({required IconData icon, required String title, required String sub})=>Center(child:Column(mainAxisAlignment:MainAxisAlignment.center, children:[Container(width:100,height:100,decoration:const BoxDecoration(gradient:AppColors.gradientPurple, shape:BoxShape.circle), child:Icon(icon,color:Colors.white,size:50)), const SizedBox(height:20), Text(title, style:const TextStyle(fontSize:20,fontWeight:FontWeight.bold)), const SizedBox(height:8), Text(sub, style:const TextStyle(color:Colors.black54))]));
