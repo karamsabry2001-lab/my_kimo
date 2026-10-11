@@ -1,4 +1,4 @@
-name: Build APK from Zip
+name: Build Flutter APK Automatically
 
 on:
   push:
@@ -13,28 +13,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Extract source code
-      run: |
-        echo "Listing files in root:"
-        ls -la
-        
-        # Look for any zip file or fallback to current directory
-        ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
-        if [ -n "$ZIP_FILE" ]; then
-          echo "Extracting $ZIP_FILE..."
-          unzip -q "$ZIP_FILE" -d extracted_code
-          cd extracted_code
-          # If there is a single folder inside, enter it
-          if [ $(ls -1 | wc -l) -eq 1 ] && [ -d "$(ls -1)" ]; then
-            cd $(ls -1)
-          fi
-          cp -r . ../../
-          cd ../..
-          rm -rf extracted_code
-        else
-          echo "No zip file found, looking for direct source files..."
-        fi
-
     - name: Set up Java
       uses: actions/setup-java@v4
       with:
@@ -46,6 +24,15 @@ jobs:
       with:
         flutter-version: '3.19.0'
         channel: 'stable'
+
+    - name: Create Project Files if Missing
+      run: |
+        if [ ! -f "pubspec.yaml" ]; then
+          echo "Creating Flutter project structure..."
+          flutter create . --org com.kimo.app --project-name my_kimo --platforms=android
+        else
+          echo "Project files exist."
+        fi
 
     - name: Install dependencies
       run: flutter pub get
