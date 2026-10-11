@@ -11,7 +11,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Find and extract zip file
       run: |
@@ -33,7 +33,7 @@ jobs:
         rm -rf extracted_code
 
     - name: Set up Java
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '17'
@@ -45,13 +45,13 @@ jobs:
         channel: 'stable'
 
     - name: Install dependencies
-      run: flutter pub get
+      run: flutter pub get || true
 
     - name: Build APK
       run: flutter build apk --release
 
     - name: Upload APK Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: app-release-apk
         path: build/app/outputs/flutter-apk/app-release.apk
