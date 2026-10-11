@@ -1,4 +1,4 @@
-name: Unzip and Build APK
+name: Build APK from Zip
 
 on:
   push:
@@ -10,22 +10,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Repository
+    - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Unzip Source Code
+    - name: Find and extract zip file
       run: |
-        mkdir app_source
-        unzip -q *.zip -d app_source || unzip -q *.zip -d .
-        if [ -d "app_source" ]; then
-          cd app_source
-          # Move files if nested in single folder
-          if [ $(ls -1 | wc -l) -eq 1 ] && [ -d "$(ls -1)" ]; then
-            cd *
-          fi
-          cp -r . ../
-          cd ..
+        echo "Searching for zip files..."
+        ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
+        if [ -z "$ZIP_FILE" ]; then
+          echo "No zip file found in root!"
+          exit 1
         fi
+        echo "Found zip file: $ZIP_FILE"
+        mkdir -p extracted_code
+        unzip -q "$ZIP_FILE" -d extracted_code
+        cd extracted_code
+        if [ $(ls -1 | wc -l) -eq 1 ] && [ -d "$(ls -1)" ]; then
+          cd $(ls -1)
+        fi
+        cp -r . ../
+        cd ..
+        rm -rf extracted_code
 
     - name: Set up Java
       uses: actions/setup-java@v3
@@ -40,7 +45,7 @@ jobs:
         channel: 'stable'
 
     - name: Install dependencies
-      run: flutter pub get || true
+      run: flutter pub get
 
     - name: Build APK
       run: flutter build apk --release
