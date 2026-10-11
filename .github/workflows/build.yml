@@ -1,0 +1,52 @@
+name: Unzip and Build APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Unzip Source Code
+      run: |
+        mkdir app_source
+        unzip -q *.zip -d app_source || unzip -q *.zip -d .
+        if [ -d "app_source" ]; then
+          cd app_source
+          # Move files if nested in single folder
+          if [ $(ls -1 | wc -l) -eq 1 ] && [ -d "$(ls -1)" ]; then
+            cd *
+          fi
+          cp -r . ../
+          cd ..
+        fi
+
+    - name: Set up Java
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.19.0'
+        channel: 'stable'
+
+    - name: Install dependencies
+      run: flutter pub get || true
+
+    - name: Build APK
+      run: flutter build apk --release
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: app-release-apk
+        path: build/app/outputs/flutter-apk/app-release.apk
